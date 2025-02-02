@@ -1,10 +1,17 @@
 use serde::{Serialize, Deserialize};
 
-// Define the structure of a Chapter
+// Page Struct
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Page {
+    pub page_number: u32,
+    pub content: String,
+}
+
+// Chapter Struct
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Chapter {
     pub chapter: String,
-    pub content: String,
+    pub pages: Vec<Page>,
     pub notes: String,
     pub quotes: Vec<String>,
 }
@@ -48,7 +55,6 @@ pub struct BookMetadata {
     pub format: String,
     pub content: Vec<Chapter>,
     pub total_chapters: u8,
-
 }
 
 impl BookMetadata {
@@ -90,7 +96,6 @@ impl BookMetadata {
             format: String::from("Blockchain"),
             content: Vec::new(),
             total_chapters: 0,
-
         }
     }
 }

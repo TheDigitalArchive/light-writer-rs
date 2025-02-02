@@ -1,10 +1,15 @@
-use book_types::{BookMetadata, Chapter};
+pub mod book_types;
+use book_types::{BookMetadata, Chapter, Page};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{cmp::min, env, fmt::Write, fs::{self, File}, io::{self, Read}, path::Path};
 use regex::Regex;
 use chrono::Utc;
 
-mod book_types;
+
+use aes::Aes256;
+use block_modes::{block_padding::Pkcs7, BlockMode, Cbc};
+type Aes256Cbc = Cbc<Aes256, Pkcs7>;
 
 pub fn create_book_template_from_env(env_file_path: &str) {
     dotenv::from_path(env_file_path).expect("Failed to load .env file from the specified path");
@@ -12,37 +17,24 @@ pub fn create_book_template_from_env(env_file_path: &str) {
     println!("{:?}", metadata);
 
     write_book_metadata_to_file(&metadata, "../light-writer-rs/books-templates/simulated_book_chapter.json").unwrap();
-    text_to_json("../light-writer-rs/books-templates/simulated_book_chapter.txt", "../light-writer-rs/books-templates/simulated_book_chapter.json").unwrap();
+   text_to_json("../light-writer-rs/books-templates/simulated_book_chapter.txt", "../light-writer-rs/books-templates/simulated_book_chapter.json").unwrap();
 }
 
 
 pub fn generate_isbn(title: &str, authors: &str) -> String {
-    // Get the current timestamp in a string format (e.g., "2025-01-10T12:00:00Z")
-    let timestamp = Utc::now().to_rfc3339();
-
-    // Concatenate the title, authors, and timestamp to create a unique string
+    let timestamp = Utc::now().to_rfc3339(); // format (e.g., "2025-01-10T12:00:00Z")
     let input = format!("{}{}{}", title, authors, timestamp);
-
-    // Create a SHA-256 hasher
     let mut hasher = Sha256::new();
-
-    // Write the concatenated string to the hasher
     hasher.update(input);
-
-    // Get the resulting hash (a 32-byte array)
     let result = hasher.finalize();
-
-    // Convert the hash to a hexadecimal string and return the first 13 characters (as an ISBN length)
     let mut isbn = String::new();
     for byte in result.iter().take(13) {
         write!(&mut isbn, "{:02x}", byte).expect("Unable to write byte");
     }
-
     isbn
 }
 
 pub fn populate_book_metadata() -> BookMetadata {
-    // Read environment variables and populate BookMetadata struct
     let metadata = BookMetadata {
         
         title: env::var("TITLE").unwrap_or_default(),
@@ -93,15 +85,10 @@ pub fn write_book_metadata_to_file(metadata: &BookMetadata, file_path: &str) -> 
 }
 
 pub fn text_to_json(text_file_path: &str, json_file_path: &str) -> io::Result<()> {
-    // Read the content of the text file
     let mut file = File::open(text_file_path)?;
     let mut content = String::new();
     file.read_to_string(&mut content)?;
-
-    // Regex pattern to match chapter labels like [ch-TheChapterOne], [ch-TheChapterTwo], etc.
-    let re = Regex::new(r"\[ch-(.*?)\]").unwrap();
-
-    // Read the existing JSON file if it exists
+    let re = Regex::new(r"\[ch-(.*?)\]").unwrap();  // regex -> i.e [ch-TheChapterOne], [ch-TheChapterTwo], etc.
     let mut book = if Path::new(json_file_path).exists() {
         let mut existing_file = File::open(json_file_path)?;
         let mut existing_content = String::new();
@@ -110,9 +97,7 @@ pub fn text_to_json(text_file_path: &str, json_file_path: &str) -> io::Result<()
     } else {
         BookMetadata::new()
     };
-
-    // Initialize a global page counter
-    let mut global_page_number = 1;
+    let mut global_page_counter = 1;
 
     // Parse the new chapters and append if not already present
     for caps in re.captures_iter(&content) {
@@ -122,48 +107,43 @@ pub fn text_to_json(text_file_path: &str, json_file_path: &str) -> io::Result<()
 
         let chapter_content = &content[chapter_start..next_chapter_pos];
 
-        // Add page markers, avoiding word truncation and keeping sentence boundaries
-        let mut paginated_content = String::new();
+        let mut pages = Vec::new();
         let mut current_pos = 0;
-        let mut page_number = global_page_number; // Start with the current global page number
+        let mut page_number = global_page_counter;
 
         while current_pos < chapter_content.len() {
-            let mut next_pos = min(current_pos + 2000, chapter_content.len());
+            let mut next_pos = min(current_pos + 2500, chapter_content.len());
 
-            // Find the last period (.) before the 2000th character, to avoid cutting words
+            // Find the last period (.) before the 2500th character, to avoid cutting words
             if let Some(period_pos) = chapter_content[current_pos..next_pos].rfind('.') {
                 next_pos = current_pos + period_pos + 1; // Include the period in the page
             }
 
-            paginated_content.push_str(&chapter_content[current_pos..next_pos]);
+            let page_content = chapter_content[current_pos..next_pos].to_string();
 
-            // Insert the page marker
-            if next_pos < chapter_content.len() {
-                paginated_content.push_str(&format!("\n[page {}]\n", page_number));
-            }
+            pages.push(Page {
+                page_number,
+                content: page_content,
+            });
 
             current_pos = next_pos;
-            page_number += 1; // Increment the page number for the next chunk
+            page_number += 1;
         }
-
-        // Update the global page number for the next chapter
-        global_page_number = page_number;
+        global_page_counter = page_number;
 
         // Check if the chapter already exists
         if !book.content.iter().any(|ch| ch.chapter == chapter_name) {
             book.content.push(Chapter {
                 chapter: chapter_name.to_string(),
-                content: paginated_content.trim().to_string(),
+                pages,
                 notes: String::new(),
                 quotes: Vec::new(),
             });
         }
     }
 
-    // Update the total chapters count
     book.total_chapters = book.content.len() as u8;
 
-    // Write the updated BookMetadata instance back to the JSON file
     let json_file = File::create(json_file_path)?;
     serde_json::to_writer_pretty(json_file, &book)?;
 
@@ -173,18 +153,15 @@ pub fn text_to_json(text_file_path: &str, json_file_path: &str) -> io::Result<()
 }
 
 pub fn get_content_by_path(file_path: &str) -> String {
-    // Step 1: Read the file contents into a string
     let mut file = fs::File::open(file_path)
         .expect("Failed to open the file");
     let mut file_contents = String::new();
     file.read_to_string(&mut file_contents)
         .expect("Failed to read the file contents");
 
-    // Step 2: Parse the JSON string
     let json_data: BookMetadata = serde_json::from_str(&file_contents)
         .expect("Failed to parse the JSON");
 
-    // Step 3: Extract the "content" field
     serde_json::to_string_pretty(&json_data.content).unwrap_or_default()
 }
 
@@ -192,37 +169,40 @@ pub fn count_characters(input: &str) -> usize {
     input.chars().count()
 }
 
-pub fn msg_encrypt(key: &str, plaintext: &str) -> String {
-    // Convert the key and plaintext into bytes
-    let key_bytes = key.as_bytes();
-    let key_length = key_bytes.len();
-    let plaintext_bytes = plaintext.as_bytes();
+pub fn light_msg_encryption(key: &[u8], json_file_path: &str) -> io::Result<String> {
+    let mut file = File::open(json_file_path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
 
-    // Perform XOR encryption
-    let encrypted_bytes: Vec<u8> = plaintext_bytes
-        .iter()
-        .enumerate()
-        .map(|(i, &byte)| byte ^ key_bytes[i % key_length])
-        .collect();
+    let book_metadata: BookMetadata = serde_json::from_str(&content)?;
+    let serialized_content = serde_json::to_string(&book_metadata)?;
 
-    hex::encode(encrypted_bytes)
+    let mut rng = rand::rng();
+    let mut iv = [0u8; 16];
+    rng.fill(&mut iv);
+
+    let cipher = Aes256Cbc::new_from_slices(key, &iv).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let encrypted_bytes = cipher.encrypt_vec(serialized_content.as_bytes());
+    let encrypted_hex = hex::encode(encrypted_bytes);
+    let iv_hex = hex::encode(iv);
+
+    Ok(format!("{}:{}", iv_hex, encrypted_hex))
 }
 
-pub fn msg_decrypt(key: &str, hex_encrypted_text: &str) -> String {
-    // Convert the key into bytes
-    let key_bytes = key.as_bytes();
-    let key_length = key_bytes.len();
+pub fn light_msg_decryption(key: &[u8], encrypted_message: &str) -> io::Result<BookMetadata> {
+    let parts: Vec<&str> = encrypted_message.split(":").collect();
+    if parts.len() != 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid encrypted message format"));
+    }
 
-    // Convert the hex string to raw bytes
-    let encrypted_bytes = hex::decode(hex_encrypted_text).expect("Failed to decode hex");
+    let iv_hex = parts[0];
+    let encrypted_hex = parts[1];
+    let iv = hex::decode(iv_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let encrypted_data = hex::decode(encrypted_hex).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let cipher = Aes256Cbc::new_from_slices(key, &iv).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let decrypted_bytes = cipher.decrypt_vec(&encrypted_data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let decrypted_str = String::from_utf8(decrypted_bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let book_metadata: BookMetadata = serde_json::from_str(&decrypted_str)?;
 
-    // Perform XOR decryption (same as encryption)
-    let decrypted_bytes: Vec<u8> = encrypted_bytes
-        .iter()
-        .enumerate()
-        .map(|(i, &byte)| byte ^ key_bytes[i % key_length])
-        .collect();
-
-    // Convert the decrypted bytes back into a string
-    String::from_utf8(decrypted_bytes).expect("Failed to convert to UTF-8")
+    Ok(book_metadata)
 }
